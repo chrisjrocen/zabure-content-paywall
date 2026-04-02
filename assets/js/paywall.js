@@ -1,12 +1,15 @@
 /**
  * Zabure Content Paywall — Frontend JavaScript
  *
- * Handles three phases:
- *   Phase 1 — Payment initiation (CTA button → phone modal → initiate API → redirect)
- *   Phase 2 — Status polling (processing page → poll check-status → redirect on completion)
- *   Phase 3 — Admin copy button (post edit screen)
+ * Phase 1 — Payment initiation:
+ *   CTA button → phone modal → POST /initiate → open Zabure in new tab → show inline spinner
  *
- * Requires: jQuery (loaded by WordPress), zabure_paywall global (via wp_localize_script)
+ * Phase 2 — Inline status polling:
+ *   Poll /check-status every 3 s; on completed redirect to full post.
+ *
+ * Phase 3 — Admin copy button (post edit screen).
+ *
+ * Requires: jQuery (loaded by WordPress), zabure_paywall global (wp_localize_script).
  *
  * @package ZabureContentPaywall
  */
@@ -17,26 +20,31 @@
 	'use strict';
 
 	// =========================================================================
+	// Shared polling state (set by Phase 1, used by Phase 2)
+	// =========================================================================
+
+	var pollTimer    = null;
+	var pollStopped  = false;
+	var pollStart    = 0;
+	var MAX_POLL_MS  = 10 * 60 * 1000; // 10 minutes
+	var POLL_INTERVAL = 3000;           // 3 seconds
+
+	// =========================================================================
 	// Phase 1 — Payment initiation
 	// =========================================================================
 
 	function initPhase1() {
-		var $payBtn   = $( '#zabure-pay-btn' );
-		var $modal    = $( '#zabure-phone-modal' );
-		var $submit   = $( '#zabure-phone-submit' );
-		var $cancel   = $( '#zabure-phone-cancel' );
-		var $phone    = $( '#zabure-phone-input' );
-		var $errBox   = $( '#zabure-phone-error' );
+		var $payBtn  = $( '#zabure-pay-btn' );
+		var $modal   = $( '#zabure-phone-modal' );
+		var $submit  = $( '#zabure-phone-submit' );
+		var $cancel  = $( '#zabure-phone-cancel' );
+		var $phone   = $( '#zabure-phone-input' );
+		var $errBox  = $( '#zabure-phone-error' );
 
 		if ( ! $payBtn.length ) {
 			return;
 		}
 
-		/**
-		 * Show an error inside the phone modal.
-		 *
-		 * @param {string} msg The error message.
-		 */
 		function showModalError( msg ) {
 			$errBox.text( msg ).show();
 		}
@@ -46,16 +54,14 @@
 		}
 
 		/**
-		 * Redirect the user to the Zabure payment page.
-		 * Opens the same tab (not a popup) to preserve cookie context.
+		 * Call the initiate endpoint, open Zabure in a new tab, show inline polling UI.
 		 *
-		 * @param {string} phoneNumber The sanitized phone number.
+		 * @param {string} phoneNumber Digits-only phone number.
 		 */
 		function initiatePayment( phoneNumber ) {
 			var postId = $payBtn.data( 'post-id' );
 
-			// Disable button to prevent double-clicks.
-			$submit.prop( 'disabled', true ).text( zabure_paywall.initiating_text || 'Redirecting…' );
+			$submit.prop( 'disabled', true ).text( 'Redirecting…' );
 
 			$.ajax( {
 				url: zabure_paywall.ajax_url + 'zabure-paywall/v1/initiate',
@@ -65,26 +71,37 @@
 					post_id: parseInt( postId, 10 ),
 					phone_number: phoneNumber
 				} ),
-				headers: {
-					'X-WP-Nonce': zabure_paywall.nonce
-				},
+				headers: { 'X-WP-Nonce': zabure_paywall.nonce },
+
 				success: function ( response ) {
-					if ( response && response.payment_url ) {
-						window.location.href = response.payment_url;
-					} else {
-						$submit.prop( 'disabled', false ).text( zabure_paywall.continue_text || 'Continue to Payment →' );
+					if ( ! response || ! response.payment_url ) {
+						$submit.prop( 'disabled', false ).text( 'Continue to Payment →' );
 						showModalError( response.error || 'An error occurred. Please try again.' );
+						return;
 					}
+
+					// Open Zabure payment page in a new tab.
+					window.open( response.payment_url, '_blank' );
+
+					// Swap to inline processing UI.
+					$modal.hide();
+					$( '#zabure-paywall-cta' ).hide();
+					$( '#zabure-inline-processing' ).show();
+					showState( 'pending' );
+
+					// Begin polling.
+					pollStopped = false;
+					pollStart   = Date.now();
+					schedulePoll( response.session_token );
 				},
+
 				error: function ( xhr ) {
-					$submit.prop( 'disabled', false ).text( zabure_paywall.continue_text || 'Continue to Payment →' );
+					$submit.prop( 'disabled', false ).text( 'Continue to Payment →' );
 					var msg = 'An error occurred. Please try again.';
 					try {
 						var body = JSON.parse( xhr.responseText );
-						if ( body && body.message ) {
-							msg = body.message;
-						} else if ( body && body.error ) {
-							msg = body.error;
+						if ( body && ( body.message || body.error ) ) {
+							msg = body.message || body.error;
 						}
 					} catch ( e ) { /* ignore */ }
 					showModalError( msg );
@@ -92,164 +109,115 @@
 			} );
 		}
 
-		// Open the phone modal on Pay button click.
+		// Open modal on Pay button click.
 		$payBtn.on( 'click', function () {
 			clearModalError();
 			$modal.show();
 			$phone.trigger( 'focus' );
 		} );
 
-		// Submit phone form.
+		// Submit phone.
 		$submit.on( 'click', function () {
 			clearModalError();
-
-			var rawPhone = $phone.val().trim();
-			var digits   = rawPhone.replace( /[^0-9]/g, '' );
-
+			var digits = $phone.val().trim().replace( /[^0-9]/g, '' );
 			if ( ! digits || digits.length < 9 || digits.length > 15 ) {
 				showModalError( 'Please enter a valid phone number (digits only, 9–15 characters).' );
 				$phone.trigger( 'focus' );
 				return;
 			}
-
 			initiatePayment( digits );
 		} );
 
-		// Allow Enter key in phone field.
+		// Enter key in phone field.
 		$phone.on( 'keydown', function ( e ) {
-			if ( 13 === e.which ) {
-				e.preventDefault();
-				$submit.trigger( 'click' );
-			}
+			if ( 13 === e.which ) { e.preventDefault(); $submit.trigger( 'click' ); }
 		} );
 
 		// Cancel / close modal.
-		$cancel.on( 'click', function () {
-			$modal.hide();
-			clearModalError();
-		} );
-
-		// Close modal on overlay click.
+		$cancel.on( 'click', function () { $modal.hide(); clearModalError(); } );
 		$modal.on( 'click', function ( e ) {
-			if ( $( e.target ).is( $modal ) ) {
-				$modal.hide();
-				clearModalError();
-			}
+			if ( $( e.target ).is( $modal ) ) { $modal.hide(); clearModalError(); }
 		} );
-
-		// Close modal on Escape key.
 		$( document ).on( 'keydown', function ( e ) {
-			if ( 27 === e.which && $modal.is( ':visible' ) ) {
-				$modal.hide();
-				clearModalError();
-			}
+			if ( 27 === e.which && $modal.is( ':visible' ) ) { $modal.hide(); clearModalError(); }
 		} );
 	}
 
 	// =========================================================================
-	// Phase 2 — Status polling (payment-processing.php page)
+	// Phase 2 — Inline status polling
 	// =========================================================================
 
-	function initPhase2() {
-		if ( ! $( 'body' ).hasClass( 'zabure-processing-page' ) ) {
+	/**
+	 * Show one of the inline processing states.
+	 *
+	 * @param {string} state  'pending' | 'success' | 'error' | 'timeout'
+	 * @param {string} [msg]  Optional message for the error state.
+	 */
+	function showState( state, msg ) {
+		$( '#zabure-inline-pending, #zabure-inline-success, #zabure-inline-error, #zabure-inline-timeout' ).hide();
+		$( '#zabure-inline-' + state ).show();
+		if ( 'error' === state && msg ) {
+			$( '#zabure-inline-error-msg' ).text( msg );
+		}
+	}
+
+	function stopPolling() {
+		pollStopped = true;
+		if ( pollTimer ) { clearTimeout( pollTimer ); pollTimer = null; }
+	}
+
+	function schedulePoll( token ) {
+		if ( ! pollStopped ) {
+			pollTimer = setTimeout( function () { doPoll( token ); }, POLL_INTERVAL );
+		}
+	}
+
+	function doPoll( token ) {
+		if ( pollStopped ) { return; }
+
+		if ( Date.now() - pollStart >= MAX_POLL_MS ) {
+			stopPolling();
+			showState( 'timeout' );
 			return;
 		}
 
-		var $container   = $( '#zabure-processing' );
-		if ( ! $container.length ) {
-			return;
-		}
+		$.ajax( {
+			url: zabure_paywall.ajax_url + 'zabure-paywall/v1/check-status',
+			method: 'GET',
+			data: { token: token },
+			headers: { 'X-WP-Nonce': zabure_paywall.nonce },
 
-		var sessionToken  = $container.data( 'session-token' );
-		if ( ! sessionToken ) {
-			return;
-		}
+			success: function ( response ) {
+				if ( ! response ) { schedulePoll( token ); return; }
 
-		var pollInterval  = 3000;        // 3 seconds between polls.
-		var maxPollTime   = 10 * 60 * 1000; // 10 minutes timeout.
-		var startTime     = Date.now();
-		var pollTimer     = null;
-		var stopped       = false;
-
-		function showState( state ) {
-			$( '#zabure-state-pending, #zabure-state-success, #zabure-state-error, #zabure-state-timeout' ).hide();
-			$( '#zabure-state-' + state ).show();
-		}
-
-		function stopPolling() {
-			stopped = true;
-			if ( pollTimer ) {
-				clearTimeout( pollTimer );
-				pollTimer = null;
-			}
-		}
-
-		function poll() {
-			if ( stopped ) {
-				return;
-			}
-
-			// Timeout check.
-			if ( Date.now() - startTime >= maxPollTime ) {
-				stopPolling();
-				showState( 'timeout' );
-				return;
-			}
-
-			$.ajax( {
-				url: zabure_paywall.ajax_url + 'zabure-paywall/v1/check-status',
-				method: 'GET',
-				data: { token: sessionToken },
-				headers: {
-					'X-WP-Nonce': zabure_paywall.nonce
-				},
-				success: function ( response ) {
-					if ( ! response ) {
-						scheduleNextPoll();
-						return;
-					}
-
-					if ( 'completed' === response.status ) {
-						stopPolling();
-						showState( 'success' );
-						setTimeout( function () {
-							window.location.href = response.redirect_url;
-						}, 1000 );
-						return;
-					}
-
-					if ( 'failed' === response.status ) {
-						stopPolling();
-						$( '#zabure-error-message' ).text( response.message || 'Payment was not completed.' );
-						showState( 'error' );
-						return;
-					}
-
-					if ( 'expired' === response.status ) {
-						stopPolling();
-						$( '#zabure-error-message' ).text( response.message || 'Session expired.' );
-						showState( 'error' );
-						return;
-					}
-
-					// status === 'pending' — keep polling.
-					scheduleNextPoll();
-				},
-				error: function () {
-					// Network error — keep trying unless timed out.
-					scheduleNextPoll();
+				if ( 'completed' === response.status ) {
+					stopPolling();
+					showState( 'success' );
+					setTimeout( function () { window.location.href = response.redirect_url; }, 1000 );
+					return;
 				}
-			} );
-		}
 
-		function scheduleNextPoll() {
-			if ( ! stopped ) {
-				pollTimer = setTimeout( poll, pollInterval );
+				if ( 'failed' === response.status ) {
+					stopPolling();
+					showState( 'error', response.message || 'Payment was not completed.' );
+					return;
+				}
+
+				if ( 'expired' === response.status ) {
+					stopPolling();
+					showState( 'error', response.message || 'Session expired.' );
+					return;
+				}
+
+				// 'pending' — keep polling.
+				schedulePoll( token );
+			},
+
+			error: function () {
+				// Network hiccup — keep trying.
+				schedulePoll( token );
 			}
-		}
-
-		// Start polling.
-		poll();
+		} );
 	}
 
 	// =========================================================================
@@ -258,24 +226,16 @@
 
 	function initPhase3() {
 		var $copyBtn = $( '#zabure-copy-link' );
-
-		if ( ! $copyBtn.length ) {
-			return;
-		}
+		if ( ! $copyBtn.length ) { return; }
 
 		$copyBtn.on( 'click', function () {
 			var url = $copyBtn.data( 'url' );
-
 			if ( navigator.clipboard && navigator.clipboard.writeText ) {
 				navigator.clipboard.writeText( url ).then( function () {
-					var original = $copyBtn.text();
+					var orig = $copyBtn.text();
 					$copyBtn.text( 'Copied!' );
-					setTimeout( function () {
-						$copyBtn.text( original );
-					}, 2000 );
-				} ).catch( function () {
-					window.prompt( 'Copy this URL:', url );
-				} );
+					setTimeout( function () { $copyBtn.text( orig ); }, 2000 );
+				} ).catch( function () { window.prompt( 'Copy this URL:', url ); } );
 			} else {
 				window.prompt( 'Copy this URL:', url );
 			}
@@ -288,7 +248,7 @@
 
 	$( document ).ready( function () {
 		initPhase1();
-		initPhase2();
+		// Phase 2 is triggered by Phase 1 (schedulePoll called on initiate success).
 		initPhase3();
 	} );
 

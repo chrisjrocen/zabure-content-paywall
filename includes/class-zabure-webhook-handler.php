@@ -133,32 +133,10 @@ class Zabure_Webhook_Handler {
 
 		$matched_session = null;
 
-		// --- Step 6: Match Strategy A — redirect-confirmed session ---
-		$candidate_sessions = Zabure_Database::get_sessions_by_amount_currency_window( $amount, $currency, 30 );
-		$redirect_sessions  = array_filter(
-			$candidate_sessions,
-			fn( object $s ) => 'redirect_received' === $s->status
-		);
-
-		if ( ! empty( $redirect_sessions ) ) {
-			if ( 1 === count( $redirect_sessions ) ) {
-				$matched_session = reset( $redirect_sessions );
-			} else {
-				// Multiple redirect_received sessions: edge case on high-traffic sites.
-				// Grant to the most recently updated (last in the query, which is DESC by initiated_at).
-				$this->log_error(
-					sprintf(
-						'Multiple redirect_received sessions matched for amount=%d currency=%s. Granting to most recent.',
-						$amount,
-						$currency
-					)
-				);
-				$matched_session = reset( $redirect_sessions ); // Already sorted DESC by initiated_at.
-			}
-		}
-
-		// --- Step 7: Match Strategy B — phone number fallback ---
-		if ( ! $matched_session && $phone ) {
+		// --- Step 6: Match Strategy A — phone number (primary) ---
+		// Zabure no longer redirects the user back; webhook is the only completion signal.
+		// Phone number is the most reliable identifier since it comes from the payment itself.
+		if ( $phone ) {
 			$phone_meta_key = (string) get_option( 'zabure_phone_meta_key', 'phone_number' );
 
 			$users = get_users(
@@ -171,24 +149,40 @@ class Zabure_Webhook_Handler {
 
 			if ( ! empty( $users ) ) {
 				$matched_user    = $users[0];
-				$pending_session = null;
+				$candidate_sessions = Zabure_Database::get_sessions_by_amount_currency_window( $amount, $currency, 30 );
 
-				// Among pending sessions for this user, find one matching amount + currency.
-				$user_sessions = Zabure_Database::get_sessions_by_amount_currency_window( $amount, $currency, 30 );
-
-				foreach ( $user_sessions as $candidate ) {
+				foreach ( $candidate_sessions as $candidate ) {
 					if (
 						'pending' === $candidate->status &&
 						(int) $candidate->user_id === (int) $matched_user->ID
 					) {
-						$pending_session = $candidate;
+						$matched_session = $candidate;
 						break;
 					}
 				}
+			}
+		}
 
-				if ( $pending_session ) {
-					$matched_session = $pending_session;
-				}
+		// --- Step 7: Match Strategy B — amount + currency window fallback ---
+		// Used when phone number is absent or not stored (edge case).
+		if ( ! $matched_session ) {
+			$candidate_sessions = Zabure_Database::get_sessions_by_amount_currency_window( $amount, $currency, 30 );
+			$pending_sessions   = array_filter(
+				$candidate_sessions,
+				fn( object $s ) => 'pending' === $s->status
+			);
+
+			if ( 1 === count( $pending_sessions ) ) {
+				$matched_session = reset( $pending_sessions );
+			} elseif ( count( $pending_sessions ) > 1 ) {
+				$this->log_error(
+					sprintf(
+						'Multiple pending sessions matched for amount=%d currency=%s with no phone. Granting to most recent.',
+						$amount,
+						$currency
+					)
+				);
+				$matched_session = reset( $pending_sessions ); // Already sorted DESC by initiated_at.
 			}
 		}
 

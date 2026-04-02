@@ -172,22 +172,6 @@ class Zabure_Payment_Handler {
 			);
 		}
 
-		// --- Set HttpOnly session cookie ---
-		// Use header() directly to support SameSite=Lax, which setcookie() lacks on older PHP.
-		$cookie_value   = rawurlencode( $session_token );
-		$cookie_expiry  = time() + 1800;
-		$cookie_expires = gmdate( 'D, d M Y H:i:s T', $cookie_expiry );
-		$secure_flag    = is_ssl() ? '; Secure' : '';
-
-		header(
-			'Set-Cookie: zabure_session=' . $cookie_value
-			. '; Expires=' . $cookie_expires
-			. '; Path=/'
-			. $secure_flag
-			. '; HttpOnly; SameSite=Lax',
-			false
-		);
-
 		return new WP_REST_Response(
 			[
 				'payment_url'   => $link_url,

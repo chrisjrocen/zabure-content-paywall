@@ -267,6 +267,19 @@
 }
 
 /* =========================================================================
+   Inline processing block (shown on article page after initiating payment)
+   ========================================================================= */
+
+#zabure-inline-processing .zabure-paywall-cta {
+	text-align: center;
+}
+
+#zabure-inline-processing .zabure-spinner {
+	display: block;
+	margin: 0 auto 1rem;
+}
+
+/* =========================================================================
    Payment processing page
    ========================================================================= */
 

@@ -91,7 +91,6 @@ add_action(
 
 		// Instantiate all classes (they register their own hooks in __construct).
 		new Zabure_Content_Filter();
-		new Zabure_Callback_Handler();
 		new Zabure_Payment_Handler();
 		new Zabure_Webhook_Handler();
 

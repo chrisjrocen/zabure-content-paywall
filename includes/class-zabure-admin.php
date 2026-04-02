@@ -92,6 +92,9 @@ class Zabure_Admin {
 			'zabure_webhook_secret'  => 'sanitize_text_field',
 			'zabure_environment'     => [ $this, 'sanitize_environment' ],
 			'zabure_phone_meta_key'  => 'sanitize_text_field',
+			'zabure_allowed_methods' => [ $this, 'sanitize_allowed_methods' ],
+			'zabure_business_name'   => 'sanitize_text_field',
+			'zabure_primary_color'   => 'sanitize_hex_color',
 		];
 
 		foreach ( $settings as $option => $sanitize_cb ) {
@@ -131,6 +134,21 @@ class Zabure_Admin {
 				'label' => __( 'Webhook Endpoint URL', 'zabure-content-paywall' ),
 				'cb'    => [ $this, 'render_field_webhook_url' ],
 			],
+			[
+				'id'    => 'zabure_allowed_methods',
+				'label' => __( 'Allowed Payment Methods', 'zabure-content-paywall' ),
+				'cb'    => [ $this, 'render_field_allowed_methods' ],
+			],
+			[
+				'id'    => 'zabure_business_name',
+				'label' => __( 'Business Name', 'zabure-content-paywall' ),
+				'cb'    => [ $this, 'render_field_business_name' ],
+			],
+			[
+				'id'    => 'zabure_primary_color',
+				'label' => __( 'Brand Primary Colour', 'zabure-content-paywall' ),
+				'cb'    => [ $this, 'render_field_primary_color' ],
+			],
 		];
 
 		foreach ( $fields as $field ) {
@@ -152,6 +170,20 @@ class Zabure_Admin {
 	 */
 	public function sanitize_environment( mixed $value ): string {
 		return in_array( $value, [ 'sandbox', 'live' ], true ) ? $value : 'sandbox';
+	}
+
+	/**
+	 * Sanitize the allowed payment methods option — whitelist only.
+	 *
+	 * @param mixed $value Raw input (array from checkboxes).
+	 * @return array
+	 */
+	public function sanitize_allowed_methods( mixed $value ): array {
+		$allowed = [ 'MTN_MOMO', 'AIRTEL_MONEY', 'VISA', 'MASTERCARD' ];
+		if ( ! is_array( $value ) ) {
+			return [ 'MTN_MOMO', 'AIRTEL_MONEY' ];
+		}
+		return array_values( array_intersect( $value, $allowed ) );
 	}
 
 	// =========================================================================
@@ -191,6 +223,32 @@ class Zabure_Admin {
 		$url = rest_url( 'zabure-paywall/v1/webhook' );
 		echo '<input type="text" value="' . esc_attr( $url ) . '" class="large-text" readonly onfocus="this.select();">';
 		echo '<p class="description">' . esc_html__( 'Copy this URL into your Zabure dashboard webhook settings.', 'zabure-content-paywall' ) . '</p>';
+	}
+
+	/** @return void */
+	public function render_field_allowed_methods(): void {
+		$current = (array) get_option( 'zabure_allowed_methods', [ 'MTN_MOMO', 'AIRTEL_MONEY' ] );
+		$methods = [ 'MTN_MOMO' => 'MTN Mobile Money', 'AIRTEL_MONEY' => 'Airtel Money', 'VISA' => 'Visa', 'MASTERCARD' => 'Mastercard' ];
+		foreach ( $methods as $val => $label ) {
+			$checked = in_array( $val, $current, true ) ? 'checked' : '';
+			echo '<label style="display:block;margin-bottom:4px;"><input type="checkbox" name="zabure_allowed_methods[]" value="' . esc_attr( $val ) . '" ' . $checked . '> ' . esc_html( $label ) . '</label>';
+		}
+		echo '<p class="description">' . esc_html__( 'Payment methods shown to users on the Zabure payment page.', 'zabure-content-paywall' ) . '</p>';
+	}
+
+	/** @return void */
+	public function render_field_business_name(): void {
+		$value = esc_attr( (string) get_option( 'zabure_business_name', get_bloginfo( 'name' ) ) );
+		echo '<input type="text" id="zabure_business_name" name="zabure_business_name" value="' . $value . '" class="regular-text">';
+		echo '<p class="description">' . esc_html__( 'Your business name as shown on the Zabure payment page. Defaults to the site name.', 'zabure-content-paywall' ) . '</p>';
+	}
+
+	/** @return void */
+	public function render_field_primary_color(): void {
+		$value = esc_attr( (string) get_option( 'zabure_primary_color', '#4f46e5' ) );
+		echo '<input type="color" id="zabure_primary_color" name="zabure_primary_color" value="' . $value . '"> ';
+		echo '<input type="text" name="zabure_primary_color" value="' . $value . '" class="small-text" placeholder="#4f46e5">';
+		echo '<p class="description">' . esc_html__( 'Brand colour shown on the Zabure payment page (hex, e.g. #4f46e5).', 'zabure-content-paywall' ) . '</p>';
 	}
 
 	// =========================================================================
@@ -432,7 +490,7 @@ class Zabure_Admin {
 			get_the_title( $post_id )
 		);
 
-		$result = $api->create_payment_link( $post_id, $amount, $currency, $description );
+		$result = $api->create_payment_link( $amount, $currency, $description );
 
 		if ( is_wp_error( $result ) ) {
 			set_transient(
