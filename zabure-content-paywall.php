@@ -95,8 +95,6 @@ add_action(
 		new Zabure_Payment_Handler();
 		new Zabure_Webhook_Handler();
 
-		if ( is_admin() ) {
-			new Zabure_Admin();
-		}
+		new Zabure_Admin();
 	}
 );

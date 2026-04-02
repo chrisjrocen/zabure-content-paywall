@@ -297,12 +297,41 @@ class Zabure_Admin {
 					<?php esc_html_e( 'Copy', 'zabure-content-paywall' ); ?>
 				</button>
 			</p>
-		<?php elseif ( $is_premium ) : ?>
-			<p class="description" style="color:#d63638;">
-				⚠️ <?php esc_html_e( 'No payment link found. Save the post to create one automatically.', 'zabure-content-paywall' ); ?>
-			</p>
 		<?php else : ?>
-			<p class="description"><?php esc_html_e( 'Enable Premium above and save to create a Zabure payment link.', 'zabure-content-paywall' ); ?></p>
+
+			<?php
+			// Show a specific reason why no link has been created yet.
+			$api_key = get_option( 'zabure_api_key', '' );
+			if ( $is_premium && empty( $api_key ) ) : ?>
+				<p class="description" style="color:#d63638;">
+					⚠️ <?php esc_html_e( 'No Zabure API key configured. Go to Settings → Zabure Paywall to add your API key, then click "Create Payment Link" below.', 'zabure-content-paywall' ); ?>
+				</p>
+			<?php elseif ( $is_premium && ! $amount ) : ?>
+				<p class="description" style="color:#d63638;">
+					⚠️ <?php esc_html_e( 'No price set. Enter a price above and click "Create Payment Link".', 'zabure-content-paywall' ); ?>
+				</p>
+			<?php elseif ( $is_premium ) : ?>
+				<p class="description" style="color:#d63638;">
+					⚠️ <?php esc_html_e( 'No payment link found.', 'zabure-content-paywall' ); ?>
+				</p>
+			<?php else : ?>
+				<p class="description"><?php esc_html_e( 'Enable Premium above to create a Zabure payment link.', 'zabure-content-paywall' ); ?></p>
+			<?php endif; ?>
+
+			<?php if ( $is_premium && $amount && $api_key ) : ?>
+				<p>
+					<button
+						type="button"
+						class="button"
+						id="zabure-create-link-btn"
+						data-post-id="<?php echo esc_attr( $post->ID ); ?>"
+						data-nonce="<?php echo esc_attr( wp_create_nonce( 'wp_rest' ) ); ?>">
+						<?php esc_html_e( 'Create Payment Link', 'zabure-content-paywall' ); ?>
+					</button>
+					<span id="zabure-create-link-status" style="margin-left:8px;"></span>
+				</p>
+			<?php endif; ?>
+
 		<?php endif; ?>
 
 		<?php
@@ -363,35 +392,85 @@ class Zabure_Admin {
 		update_post_meta( $post_id, '_zabure_currency',           $currency );
 		update_post_meta( $post_id, '_zabure_preview_paragraphs', $preview_n );
 
-		// Create payment link if premium is newly enabled and no link exists yet.
+		// Create payment link if premium is enabled and no link exists yet.
 		$existing_link_id = (string) get_post_meta( $post_id, '_zabure_link_id', true );
 
-		if ( 1 === $new_is_premium && empty( $existing_link_id ) && $amount > 0 ) {
-			$api         = new Zabure_API();
-			$description = sprintf(
-				/* translators: %s: post title */
-				__( 'Access: %s', 'zabure-content-paywall' ),
-				get_the_title( $post_id )
-			);
-			$result = $api->create_payment_link( $post_id, $amount, $currency, $description );
-
-			if ( is_wp_error( $result ) ) {
+		if ( 1 === $new_is_premium && empty( $existing_link_id ) ) {
+			if ( $amount <= 0 ) {
 				set_transient(
 					'zabure_link_error_' . $post_id,
-					sprintf(
-						/* translators: %s: error message */
-						__( 'Failed to create Zabure payment link: %s', 'zabure-content-paywall' ),
-						$result->get_error_message()
-					),
+					__( 'Payment link not created: price must be greater than 0.', 'zabure-content-paywall' ),
+					60
+				);
+			} elseif ( empty( get_option( 'zabure_api_key', '' ) ) ) {
+				set_transient(
+					'zabure_link_error_' . $post_id,
+					__( 'Payment link not created: no API key configured in Settings → Zabure Paywall.', 'zabure-content-paywall' ),
 					60
 				);
 			} else {
-				$link_id  = $result['id'] ?? '';
-				$link_url = $result['url'] ?? '';
-				update_post_meta( $post_id, '_zabure_link_id',  sanitize_text_field( $link_id ) );
-				update_post_meta( $post_id, '_zabure_link_url', esc_url_raw( $link_url ) );
+				$this->do_create_payment_link( $post_id, $amount, $currency );
 			}
 		}
+	}
+
+	/**
+	 * Call the Zabure API to create a payment link and store the result in post meta.
+	 *
+	 * Extracted so it can be called from both save_meta_box and the REST endpoint.
+	 *
+	 * @param int    $post_id  The post ID.
+	 * @param int    $amount   Amount in smallest currency unit.
+	 * @param string $currency Currency code.
+	 * @return true|WP_Error True on success, WP_Error on failure.
+	 */
+	private function do_create_payment_link( int $post_id, int $amount, string $currency ): true|WP_Error {
+		$api         = new Zabure_API();
+		$description = sprintf(
+			/* translators: %s: post title */
+			__( 'Access: %s', 'zabure-content-paywall' ),
+			get_the_title( $post_id )
+		);
+
+		$result = $api->create_payment_link( $post_id, $amount, $currency, $description );
+
+		if ( is_wp_error( $result ) ) {
+			set_transient(
+				'zabure_link_error_' . $post_id,
+				sprintf(
+					/* translators: %s: error message */
+					__( 'Failed to create Zabure payment link: %s', 'zabure-content-paywall' ),
+					$result->get_error_message()
+				),
+				120
+			);
+			return $result;
+		}
+
+		// Support multiple possible field names for the link URL.
+		$link_id  = $result['id'] ?? $result['linkId'] ?? $result['link_id'] ?? '';
+		$link_url = $result['url'] ?? $result['paymentUrl'] ?? $result['payment_url'] ?? $result['shortUrl'] ?? $result['link'] ?? '';
+
+		if ( empty( $link_id ) || empty( $link_url ) ) {
+			// Log the actual response so it's debuggable.
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			error_log( '[Zabure Paywall] Unexpected API response for create_payment_link: ' . wp_json_encode( $result ) );
+
+			$error_msg = sprintf(
+				/* translators: %s: raw API response */
+				__( 'Zabure API returned an unexpected response. Check the error log. Raw response: %s', 'zabure-content-paywall' ),
+				esc_html( wp_json_encode( $result ) )
+			);
+
+			set_transient( 'zabure_link_error_' . $post_id, $error_msg, 120 );
+
+			return new WP_Error( 'zabure_unexpected_response', $error_msg );
+		}
+
+		update_post_meta( $post_id, '_zabure_link_id',  sanitize_text_field( $link_id ) );
+		update_post_meta( $post_id, '_zabure_link_url', esc_url_raw( $link_url ) );
+
+		return true;
 	}
 
 	// =========================================================================
@@ -657,6 +736,23 @@ class Zabure_Admin {
 	public function register_rest_routes(): void {
 		register_rest_route(
 			'zabure-paywall/v1',
+			'/admin/create-link',
+			[
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => [ $this, 'rest_create_link' ],
+				'permission_callback' => [ $this, 'admin_permission_check' ],
+				'args'                => [
+					'post_id' => [
+						'required'          => true,
+						'type'              => 'integer',
+						'sanitize_callback' => 'absint',
+					],
+				],
+			]
+		);
+
+		register_rest_route(
+			'zabure-paywall/v1',
 			'/admin/grant',
 			[
 				'methods'             => WP_REST_Server::CREATABLE,
@@ -707,6 +803,60 @@ class Zabure_Admin {
 	 */
 	public function admin_permission_check(): bool {
 		return current_user_can( 'manage_options' );
+	}
+
+	/**
+	 * REST endpoint: create (or recreate) the Zabure payment link for a post.
+	 *
+	 * Called by the "Create Payment Link" button in the meta box.
+	 *
+	 * @param WP_REST_Request $request The REST request.
+	 * @return WP_REST_Response
+	 */
+	public function rest_create_link( WP_REST_Request $request ): WP_REST_Response {
+		$post_id = (int) $request->get_param( 'post_id' );
+		$post    = get_post( $post_id );
+
+		if ( ! $post ) {
+			return new WP_REST_Response( [ 'success' => false, 'message' => __( 'Post not found.', 'zabure-content-paywall' ) ], 404 );
+		}
+
+		$amount   = (int) get_post_meta( $post_id, '_zabure_amount', true );
+		$currency = (string) get_post_meta( $post_id, '_zabure_currency', true );
+
+		if ( $amount <= 0 ) {
+			return new WP_REST_Response(
+				[ 'success' => false, 'message' => __( 'Price must be greater than 0. Save the post with a valid price first.', 'zabure-content-paywall' ) ],
+				400
+			);
+		}
+
+		if ( empty( get_option( 'zabure_api_key', '' ) ) ) {
+			return new WP_REST_Response(
+				[ 'success' => false, 'message' => __( 'No Zabure API key configured. Go to Settings → Zabure Paywall.', 'zabure-content-paywall' ) ],
+				400
+			);
+		}
+
+		// Allow recreating by clearing the old link first.
+		delete_post_meta( $post_id, '_zabure_link_id' );
+		delete_post_meta( $post_id, '_zabure_link_url' );
+
+		$result = $this->do_create_payment_link( $post_id, $amount, $currency ?: 'UGX' );
+
+		if ( is_wp_error( $result ) ) {
+			return new WP_REST_Response(
+				[ 'success' => false, 'message' => $result->get_error_message() ],
+				500
+			);
+		}
+
+		$link_url = (string) get_post_meta( $post_id, '_zabure_link_url', true );
+
+		return new WP_REST_Response(
+			[ 'success' => true, 'link_url' => $link_url, 'message' => __( 'Payment link created successfully.', 'zabure-content-paywall' ) ],
+			200
+		);
 	}
 
 	/**
@@ -801,6 +951,7 @@ class Zabure_Admin {
 			'jquery',
 			"
 			jQuery(document).ready(function(\$) {
+				// Copy link button.
 				\$('#zabure-copy-link').on('click', function() {
 					var url = \$(this).data('url');
 					if (navigator.clipboard) {
@@ -810,6 +961,40 @@ class Zabure_Admin {
 					} else {
 						window.prompt('" . esc_js( __( 'Copy this URL:', 'zabure-content-paywall' ) ) . "', url);
 					}
+				});
+
+				// Create Payment Link button.
+				\$('#zabure-create-link-btn').on('click', function() {
+					var btn    = \$(this);
+					var status = \$('#zabure-create-link-status');
+					var postId = btn.data('post-id');
+					var nonce  = btn.data('nonce');
+
+					btn.prop('disabled', true).text('" . esc_js( __( 'Creating…', 'zabure-content-paywall' ) ) . "');
+					status.text('').css('color', '');
+
+					jQuery.ajax({
+						url: '" . esc_js( rest_url( 'zabure-paywall/v1/admin/create-link' ) ) . "',
+						method: 'POST',
+						contentType: 'application/json',
+						data: JSON.stringify({ post_id: parseInt(postId, 10) }),
+						headers: { 'X-WP-Nonce': nonce },
+						success: function(data) {
+							if (data.success) {
+								status.text('" . esc_js( __( '✅ Done! Reloading…', 'zabure-content-paywall' ) ) . "').css('color', 'green');
+								setTimeout(function() { location.reload(); }, 1200);
+							} else {
+								btn.prop('disabled', false).text('" . esc_js( __( 'Create Payment Link', 'zabure-content-paywall' ) ) . "');
+								status.text(data.message || '" . esc_js( __( 'Error — check the error log.', 'zabure-content-paywall' ) ) . "').css('color', '#d63638');
+							}
+						},
+						error: function(xhr) {
+							btn.prop('disabled', false).text('" . esc_js( __( 'Create Payment Link', 'zabure-content-paywall' ) ) . "');
+							var msg = '" . esc_js( __( 'Request failed.', 'zabure-content-paywall' ) ) . "';
+							try { var b = JSON.parse(xhr.responseText); if (b.message) msg = b.message; } catch(e) {}
+							status.text(msg).css('color', '#d63638');
+						}
+					});
 				});
 			});
 			"
